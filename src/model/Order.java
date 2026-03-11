@@ -11,12 +11,20 @@ public class Order {
     int prepTime;
     int readyTime;
     int deadline;
+    private Status status;
+
+    public enum Status {
+        WAITING,
+        PICKED_UP,
+        DELIVERED
+    }
+
 
     public Order() {
     }
 
 
-    public Order(int id, Node pickup, Node dropoff, int orderTime, int prepTime, int readyTime, int deadline) {
+    public Order(int id, Node pickup, Node dropoff, int orderTime, int prepTime, int readyTime, int deadline,Status status) {
         setId(id);
         setPickup(pickup);
         setDropoff(dropoff);
@@ -24,8 +32,11 @@ public class Order {
         setPrepTime(prepTime);
         setReadyTime(readyTime);
         setDeadline(deadline);
+        setStatus(status);
+
     }
 
+    // getters and setters
 
     public int getId() {
         return id;
@@ -83,6 +94,37 @@ public class Order {
         this.deadline = deadline;
     }
 
+    public Status getStatus() {
+        return status;
+    }
+
+    public void setStatus(Status status) {
+        this.status = status;
+    }
+
+    // status helper
+
+    public boolean isWaiting() {
+        return status == Status.WAITING;
+    }
+
+    public boolean isPickedUp() {
+        return status == Status.PICKED_UP;
+    }
+
+    public boolean isDelivered() {
+        return status == Status.DELIVERED;
+    }
+
+    public void markPickedUp() {
+        this.status = Status.PICKED_UP;
+    }
+
+    public void markDelivered() {
+        this.status = Status.DELIVERED;
+    }
+
+
     @Override
     public String toString() {
         return "Order{" +
@@ -93,6 +135,7 @@ public class Order {
                 ", prepTime=" + prepTime +
                 ", readyTime=" + readyTime +
                 ", deadline=" + deadline +
+                ", status=" + status +
                 '}';
     }
 }
