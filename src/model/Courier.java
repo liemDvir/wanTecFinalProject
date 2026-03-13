@@ -1,127 +1,84 @@
 package model;
 
+import java.util.ArrayList;
 import java.util.List;
 
-    public class Courier {
+public class Courier {
 
-        private int id;
+    private int          id;
+    private String       controlArea;
+    private String       currentLocation;
+    private int          estimatedAvailableTimeMinutes;
+    private List<String> routePlan;
+    private int          capacity;        // max simultaneous orders
+    private int          currentCapacity; // how many orders courier currently carries
+    private Status       status;
 
-        private String controlArea;
-        private String currentLocation;
-        private int estimatedAvailableTimeMinutes;
-        private List<String> routePlan;
-        private int capacity; // max delivers per courier
-        private int currentCapacity; // how many delivers has the courier
-        private Courier.Status status;
+    public enum Status { AVAILABLE, EN_ROUTE, WAITING }
 
-
-
-        public enum Status {
-            AVAILABLE, // has no delivers, not in a Restaurant
-            EN_ROUTE, // in a route
-            WAITING // waiting in the Restaurant
-        }
-
-
-        public Courier(int id, String controlArea, String currentLocation, int estimatedAvailableTimeMinutes,
-                       List<String> routePlan, int capacity,int currentCapacity,Courier.Status status) {
-
-            setId(id);
-            setControlArea(controlArea);
-            setCurrentLocation(currentLocation);
-            setEstimatedAvailableTimeMinutes(estimatedAvailableTimeMinutes);
-            setRoutePlan(routePlan);
-            setCapacity(capacity);
-            setCurrentCapacity(currentCapacity);
-            setStatus(status);
-        }
-
-        public Courier(int id, String controlArea, String currentLocation, int estimatedAvailableTimeMinutes,
-                       List<String> routePlan, int capacity,Courier.Status status) {
-
-            setId(id);
-            setControlArea(controlArea);
-            setCurrentLocation(currentLocation);
-            setEstimatedAvailableTimeMinutes(estimatedAvailableTimeMinutes);
-            setRoutePlan(routePlan);
-            setCapacity(capacity);
-            setCurrentCapacity(0);
-            setStatus(status);
-        }
-
-        //getters and setters
-
-        public int getId() {
-            return id;
-        }
-
-        public void setId(int id) {
-            this.id = id;
-        }
-
-        public String getControlArea() {
-            return controlArea;
-        }
-
-        public void setControlArea(String controlArea) {
-            this.controlArea = controlArea;
-        }
-
-        public String getCurrentLocation() {
-            return currentLocation;
-        }
-
-        public void setCurrentLocation(String currentLocation) {
-            this.currentLocation = currentLocation;
-        }
-
-        public int getEstimatedAvailableTimeMinutes() {
-            return estimatedAvailableTimeMinutes;
-        }
-
-        public void setEstimatedAvailableTimeMinutes(int estimatedAvailableTimeMinutes) {
-            this.estimatedAvailableTimeMinutes = estimatedAvailableTimeMinutes;
-        }
-
-        public List<String> getRoutePlan() {
-            return routePlan;
-        }
-
-        public void setRoutePlan(List<String> routePlan) {
-            this.routePlan = routePlan;
-        }
-
-        public int getCapacity() {
-            return capacity;
-        }
-
-        public void setCapacity(int capacity) {
-            this.capacity = capacity;
-        }
-
-        public Courier.Status getStatus() {
-            return status;
-        }
-
-        public void setStatus(Courier.Status status) {
-            this.status = status;
-        }
-
-        public int getCurrentCapacity() {
-            return currentCapacity;
-        }
-
-        public void setCurrentCapacity(int currentCapacity) {
-            this.currentCapacity = currentCapacity;
-        }
-
-
-
-        public void assignOrder(Order order) {
-            // TODO - PUTS THE ORDER IN THE COURIER LIST
-        }
-
-
+    // ── Full constructor ─────────────────────────────────────────
+    public Courier(int id, String controlArea, String currentLocation,
+                   int estimatedAvailableTimeMinutes, List<String> routePlan,
+                   int capacity, int currentCapacity, Status status) {
+        setId(id);
+        setControlArea(controlArea);
+        setCurrentLocation(currentLocation);
+        setEstimatedAvailableTimeMinutes(estimatedAvailableTimeMinutes);
+        setRoutePlan(routePlan);
+        setCapacity(capacity);
+        setCurrentCapacity(currentCapacity);
+        setStatus(status);
     }
 
+    // ── Convenience constructor (currentCapacity defaults to 0) ──
+    public Courier(int id, String controlArea, String currentLocation,
+                   int estimatedAvailableTimeMinutes, List<String> routePlan,
+                   int capacity, Status status) {
+        this(id, controlArea, currentLocation, estimatedAvailableTimeMinutes,
+                routePlan, capacity, 0, status);
+    }
 
+    // ── Getters / Setters ────────────────────────────────────────
+    public int          getId()                              { return id; }
+    public void         setId(int id)                        { this.id = id; }
+    public String       getControlArea()                     { return controlArea; }
+    public void         setControlArea(String s)             { this.controlArea = s; }
+    public String       getCurrentLocation()                 { return currentLocation; }
+    public void         setCurrentLocation(String s)         { this.currentLocation = s; }
+    public int          getEstimatedAvailableTimeMinutes()   { return estimatedAvailableTimeMinutes; }
+    public void         setEstimatedAvailableTimeMinutes(int t) { this.estimatedAvailableTimeMinutes = t; }
+    public List<String> getRoutePlan()                       { return routePlan; }
+    public void         setRoutePlan(List<String> r)         { this.routePlan = r; }
+    public int          getCapacity()                        { return capacity; }
+    public void         setCapacity(int c)                   { this.capacity = c; }
+    public int          getCurrentCapacity()                 { return currentCapacity; }
+    public void         setCurrentCapacity(int c)            { this.currentCapacity = c; }
+    public Status       getStatus()                          { return status; }
+    public void         setStatus(Status s)                  { this.status = s; }
+
+    // ── Business logic ───────────────────────────────────────────
+
+    /**
+     * Assign an order to this courier.
+     * FIX: was empty (TODO) — now adds pickup+dropoff to routePlan
+     * and increments currentCapacity.
+     */
+    public void assignOrder(Order order) {
+        if (routePlan == null) routePlan = new ArrayList<>();
+        routePlan.add("PICKUP:"  + order.getId());
+        routePlan.add("DROPOFF:" + order.getId());
+        currentCapacity++;
+        setStatus(Status.WAITING); // courier heads to restaurant to wait/pick up
+    }
+
+    /** True when the courier can still take another order. */
+    public boolean hasCapacity() {
+        return currentCapacity < capacity;
+    }
+
+    @Override public String toString() {
+        return "Courier{id=" + id + ", status=" + status +
+                ", capacity=" + currentCapacity + "/" + capacity +
+                ", availableAt=" + estimatedAvailableTimeMinutes + "}";
+    }
+}
