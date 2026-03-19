@@ -3,7 +3,7 @@ package model;
 public class Order {
 
     private int    id;
-    private Node   pickup;      // FIX: was org.w3c.dom.Node — replaced with model.Node
+    private Node   pickup;
     private Node   dropoff;
     private int    orderTime;
     private int    prepTime;
@@ -11,7 +11,12 @@ public class Order {
     private int    deadline;
     private Status status;
 
-    public enum Status { WAITING, PICKED_UP, DELIVERED }
+    public enum Status {
+        WAITING,    // not yet assigned to any courier
+        ASSIGNED,   // assigned to a courier — no other courier can take it
+        PICKED_UP,  // courier physically picked up the food
+        DELIVERED   // delivered to customer
+    }
 
     public Order() {}
 
@@ -46,11 +51,14 @@ public class Order {
     public void   setStatus(Status s)      { this.status = s; }
 
     // ── Status helpers ───────────────────────────────────────────
-    public boolean isWaiting()   { return status == Status.WAITING;   }
-    public boolean isPickedUp()  { return status == Status.PICKED_UP; }
-    public boolean isDelivered() { return status == Status.DELIVERED; }
-    public void    markPickedUp()  { this.status = Status.PICKED_UP; }
-    public void    markDelivered() { this.status = Status.DELIVERED; }
+    public boolean isWaiting()    { return status == Status.WAITING;   }
+    public boolean isAssigned()   { return status == Status.ASSIGNED;  }
+    public boolean isPickedUp()   { return status == Status.PICKED_UP; }
+    public boolean isDelivered()  { return status == Status.DELIVERED; }
+
+    public void markAssigned()   { this.status = Status.ASSIGNED;  }
+    public void markPickedUp()   { this.status = Status.PICKED_UP; }
+    public void markDelivered()  { this.status = Status.DELIVERED; }
 
     @Override public String toString() {
         return "Order{id=" + id + ", orderTime=" + orderTime +

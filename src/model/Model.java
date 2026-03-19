@@ -1,78 +1,76 @@
 package model;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Random;
-import java.util.logging.Logger;
+import java.util.ArrayList;
 
+/**
+ * ═══════════════════════════════════════════════════
+ *  Model — the M in MVC.
+ *
+ *  Responsibilities:
+ *    - Hold all simulation data.
+ *    - Provide generic operations on that data
+ *      (add order, get couriers, advance time, etc.)
+ *
+ *  Rules:
+ *    - NO decision making.
+ *    - NO "which courier is best" logic.
+ *    - NO knowledge of View or Controller.
+ *    - Every method here is a simple data operation.
+ * ═══════════════════════════════════════════════════
+ */
 public class Model {
 
-    private static final Logger LOGGER = Logger.getLogger(Model.class.getName());
-
-    private List<Order>   orders;
-    private List<Courier> couriers;
-    private int           currentTime;
-
+    private Graph          graph;
+    private Restaurant     restaurant;
+    private List<Order>    orders;
+    private List<Courier>  couriers;
+    private int            currentTime;
 
     public Model() {
-        LOGGER.info("creating new model");
-        orders   = new ArrayList<>();   // FIX: must initialise BEFORE add()
-        couriers = new ArrayList<>();
-        currentTime = 0;
-
-        orders.add(createRandomOrder());
-        couriers.add(createRandomCourier());
-    }
-
-    public Model(List<Order> orders, List<Courier> couriers) {
-        this.orders   = orders;
-        this.couriers = couriers;
+        this.orders      = new ArrayList<>();
+        this.couriers    = new ArrayList<>();
         this.currentTime = 0;
     }
 
-    public Model(List<Order> orders, List<Courier> couriers, int currentTime) {
-        this.orders      = orders;
-        this.couriers    = couriers;
-        this.currentTime = currentTime;
-    }
+    // ── Graph ────────────────────────────────────────────────────
+    public Graph      getGraph()              { return graph; }
+    public void       setGraph(Graph g)       { this.graph = g; }
 
-    // ── Getters / Setters ────────────────────────────────────────
-    public List<Order>   getOrders()               { return orders; }
-    public void          setOrders(List<Order> o)  { this.orders = o; }
-    public List<Courier> getCouriers()             { return couriers; }
+    // ── Restaurant ───────────────────────────────────────────────
+    public Restaurant getRestaurant()         { return restaurant; }
+    public void       setRestaurant(Restaurant r) { this.restaurant = r; }
+
+    // ── Orders ───────────────────────────────────────────────────
+    public List<Order> getOrders()            { return orders; }
+    public void        addOrder(Order o)      { orders.add(o); }
+    public void        setOrders(List<Order> o) { this.orders = o; }
+
+    // ── Couriers ─────────────────────────────────────────────────
+    public List<Courier> getCouriers()              { return couriers; }
+    public void          addCourier(Courier c)      { couriers.add(c); }
     public void          setCouriers(List<Courier> c) { this.couriers = c; }
-    public int           getCurrentTime()          { return currentTime; }
-    public void          setCurrentTime(int t)     { this.currentTime = t; }
 
-    // ── Factory helpers ──────────────────────────────────────────
+    // ── Time ─────────────────────────────────────────────────────
+    public int  getCurrentTime()              { return currentTime; }
+    public void setCurrentTime(int t)         { this.currentTime = t; }
+    public void advanceTime()                 { this.currentTime++; }
 
+    // ── Generic queries (no decisions — just data) ────────────────
 
-    public Order createRandomOrder() {
-        Random random  = new Random();
-        Node pickup  = new Node(random.nextInt(100), random.nextDouble() * 10, random.nextDouble() * 10, "Pickup");
-        Node dropoff = new Node(random.nextInt(100) + 100, random.nextDouble() * 10, random.nextDouble() * 10, "Dropoff");
-
-        int orderTime = random.nextInt(101);
-        int prepTime  = 15;
-        int readyTime = orderTime + prepTime;
-        int deadline  = readyTime + 30;
-
-        return new Order(random.nextInt(1000) + 1,
-                pickup, dropoff,
-                orderTime, prepTime, readyTime, deadline,
-                Order.Status.WAITING);
+    /** Orders that are available for assignment — WAITING only, not ASSIGNED. */
+    public List<Order> getWaitingOrders() {
+        List<Order> result = new ArrayList<>();
+        for (Order o : orders)
+            if (o.isWaiting()) result.add(o);
+        return result;
     }
 
-
-    public Courier createRandomCourier() {
-        Random random   = new Random();
-        List<String> routePlan = new ArrayList<>();
-        int id          = random.nextInt(1000) + 1;
-        String area     = "Central-" + random.nextInt(10);
-        String location = "Hub-"     + random.nextInt(20);
-        int availTime   = random.nextInt(61);
-        int capacity    = random.nextInt(5) + 1;
-        return new Courier(id, area, location, availTime, routePlan,
-                capacity, 0, Courier.Status.AVAILABLE);
+    /** All couriers that are idle and waiting for a new order. */
+    public List<Courier> getAvailableCouriers() {
+        List<Courier> result = new ArrayList<>();
+        for (Courier c : couriers)
+            if (c.getStatus() == Courier.Status.AVAILABLE) result.add(c);
+        return result;
     }
 }
