@@ -110,6 +110,14 @@ public class Controller {
     // ── City construction — ALL decisions made here ───────────────
 
     /**
+     * Test-only entry point — builds the city without launching JavaFX.
+     * Allows unit tests to call tick() and inspect the model directly.
+     */
+    public void buildCityForTest() {
+        model = buildCity();
+        // view remains null — refreshView() guards against this
+    }
+    /**
      * Build a complete city:
      *   1. Ask MapGenerator for a Graph (pure street layout).
      *   2. Decide where the restaurant goes (most central node).
@@ -185,7 +193,6 @@ public class Controller {
 
         // Step 1: assign orders to idle couriers
         for (Courier courier : model.getAvailableCouriers()) {
-            // TODO - IF HIS CAPACITY IS FULL, HE STARTS THE DELIVERY ROUTE
             if (courier.getCurrentCapacity() >= courier.getCapacity()) continue;
             Order best = pickBestOrder(courier, time);
             if (best != null) assignOrder(courier, best);
@@ -539,4 +546,12 @@ public class Controller {
 
     // ── Getters ───────────────────────────────────────────────────
     public Model getModel() { return model; }
+    /**
+     * Test-only — inject a pre-built model directly.
+     * Allows tests to use a deterministic graph instead of the random one.
+     */
+    public void setModelForTest(Model m) {
+        this.model = m;
+    }
+
 }

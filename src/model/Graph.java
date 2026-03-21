@@ -136,13 +136,17 @@ public class Graph {
             }
         }
 
-        // Reconstruct path from 'to' back to 'from'
+        // Reconstruct path from 'to' back to 'from'.
+        // First check if 'to' is reachable — if prev doesn't contain it
+        // and it's not the source, then no path exists.
+        if (!prev.containsKey(to)) return new ArrayList<>();
+
         List<Node> path = new ArrayList<>();
         Integer cur = to;
         while (cur != null && cur != from) {
             path.add(0, nodes.get(cur));
             cur = prev.get(cur);
         }
-        return path; // empty if unreachable
+        return path;
     }
 }
