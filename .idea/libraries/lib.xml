@@ -1,7 +1,27 @@
 <component name="libraryTable">
   <library name="lib">
-    <CLASSES />
+    <CLASSES>
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/lib" />
+    </CLASSES>
     <JAVADOC />
-    <SOURCES />
+    <NATIVE>
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/lib" />
+    </NATIVE>
+    <SOURCES>
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/src/javafx.base" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/src/javafx.controls" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/src/javafx.fxml" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/src/javafx.graphics" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/src/javafx.media" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/src/javafx.swing" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/src/javafx.web" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10" />
+      <root url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10" />
+    </SOURCES>
+    <jarDirectory url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10/lib" recursive="false" />
+    <jarDirectory url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10" recursive="false" type="SOURCES" />
+    <jarDirectory url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10" recursive="false" type="SOURCES" />
+    <jarDirectory url="file://$USER_HOME$/Downloads/javafx-sdk-21.0.10" recursive="false" type="SOURCES" />
   </library>
 </component>

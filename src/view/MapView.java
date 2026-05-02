@@ -9,6 +9,7 @@ import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.*;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
@@ -23,20 +24,19 @@ import java.util.ArrayList;
  * ═══════════════════════════════════════════════════
  *  MapView — the V in MVC.
  *
- *  Responsibilities (ONLY these):
- *    - Render whatever the Controller gives it.
- *    - Expose public draw methods:
- *        drawMap(graph, restaurant, orders, couriers)
- *        updateSidebar(time, waiting, pickedUp, delivered, couriers)
- *    - On each animation tick: notify Controller via tick(),
- *      then let Controller push updated data back via drawMap().
- *    - Forward button presses to Controller.
+ *  Only change from the original:
+ *    drawCouriers() now uses the Courier's edge-traversal fields
+ *    (edgeOriginNode, edgeDestNode, edgeTicksDone, edgeTicksTotal)
+ *    to interpolate the visual position smoothly across the full
+ *    duration of each edge, instead of the old previousNode/currentNode
+ *    single-tick interpolation.
  *
- *  Rules:
- *    - NEVER holds a Model reference.
- *    - NEVER makes any decision.
- *    - NEVER creates or modifies data objects.
- *    - Receives everything it needs as method parameters.
+ *  Animation formula:
+ *    fraction = (edgeTicksDone - 1 + animProgress) / edgeTicksTotal
+ *    x = edgeOrigin.x + (edgeDest.x - edgeOrigin.x) * fraction
+ *
+ *  This gives perfect continuity: the position at animProgress=0 of
+ *  tick T equals the position at animProgress=1 of tick T-1.
  * ═══════════════════════════════════════════════════
  */
 public class MapView extends Application {
@@ -44,7 +44,7 @@ public class MapView extends Application {
     // ── Layout ───────────────────────────────────────────────────
     private static final double MAP_W     = 780;
     private static final double MAP_H     = 620;
-    private static final double SIDEBAR_W = 310;  // wider to fit SCORE column
+    private static final double SIDEBAR_W = 310;
     private static final double BOTTOM_H  = 56;
 
     // ── Colour palette ────────────────────────────────────────────
@@ -62,27 +62,22 @@ public class MapView extends Application {
     private static final Color PANEL_BG     = Color.web("#1A1D27");
     private static final Color LATE_COLOR   = Color.web("#F87171");
 
-    // ── Static bridge — set by Controller before launch() ────────
+    // ── Static bridge ─────────────────────────────────────────────
     private static Controller pendingController;
     public  static void setController(Controller c) { pendingController = c; }
 
     // ── Instance fields ───────────────────────────────────────────
     private Controller controller;
 
-    // Animation state — used ONLY for smooth visual interpolation.
-    // The Controller owns simulation logic; this is purely cosmetic.
-    // progress goes 0→1 over TICK_INTERVAL_NS, then resets each tick.
     private static final long   TICK_INTERVAL_NS = 600_000_000L;
-    private              long   tickStartTime    = 0;  // ns timestamp of last tick
-    private              double animProgress     = 1.0; // 0.0=just moved, 1.0=arrived
+    private              long   tickStartTime    = 0;
+    private              double animProgress     = 1.0;
 
-    // Snapshot of couriers kept for interpolation between ticks
-    private List<Courier> lastCouriers  = new ArrayList<>();
-    private Graph         lastGraph     = null;
-    private Restaurant    lastRestaurant = null;
-    private List<Order>   lastOrders    = new ArrayList<>();
+    private List<Courier>  lastCouriers   = new ArrayList<>();
+    private Graph          lastGraph      = null;
+    private Restaurant     lastRestaurant = null;
+    private List<Order>    lastOrders     = new ArrayList<>();
 
-    // UI nodes
     private Canvas canvas;
     private Label  lblTime;
     private Label  lblOrders;
@@ -109,17 +104,12 @@ public class MapView extends Application {
         stage.setResizable(false);
         stage.show();
 
-        // AnimationTimer — purely for smooth visual rendering.
-        // Runs at ~60fps, only responsible for interpolating courier positions.
-        // All simulation logic stays in the Controller thread.
         new AnimationTimer() {
             @Override public void handle(long now) {
                 if (tickStartTime > 0) {
-                    // progress: 0.0 = just ticked, 1.0 = next tick due
                     animProgress = Math.min(1.0,
                             (double)(now - tickStartTime) / TICK_INTERVAL_NS);
                 }
-                // Redraw couriers at interpolated position every frame
                 redrawCouriersOnly();
             }
         }.start();
@@ -127,17 +117,10 @@ public class MapView extends Application {
         controller.onViewReady(this);
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  PUBLIC DISPLAY API — called by Controller, never by View itself
-    // ══════════════════════════════════════════════════════════════
+    // ── Public display API ────────────────────────────────────────
 
-    /**
-     * Full redraw — called by Controller after each tick.
-     * Saves a snapshot of the data for the animation loop to use.
-     */
     public void drawMap(Graph graph, Restaurant restaurant,
                         List<Order> orders, List<Courier> couriers) {
-        // Save snapshot for the animation loop
         lastGraph      = graph;
         lastRestaurant = restaurant;
         lastOrders     = orders;
@@ -158,17 +141,9 @@ public class MapView extends Application {
         drawLegend(gc);
     }
 
-    /**
-     * Lightweight redraw called at ~60fps by the AnimationTimer.
-     * Only redraws the moving parts (couriers) over the static background.
-     * Avoids redrawing roads/restaurant on every frame.
-     */
     private void redrawCouriersOnly() {
         if (lastGraph == null || lastCouriers == null) return;
         GraphicsContext gc = canvas.getGraphicsContext2D();
-
-        // Repaint background + static elements once per tick,
-        // then let animation loop only update couriers
         gc.setFill(BG_DARK);
         gc.fillRect(0, 0, MAP_W, MAP_H);
         drawRoads(gc, lastGraph);
@@ -179,10 +154,6 @@ public class MapView extends Application {
         drawLegend(gc);
     }
 
-    /**
-     * Refresh the sidebar stats.
-     * Controller passes the exact numbers — View just displays them.
-     */
     public void updateSidebar(int time, int waiting, int assigned,
                               int pickedUp, int delivered, int courierCount) {
         lblTime.setText("t = " + time);
@@ -194,17 +165,11 @@ public class MapView extends Application {
         lblCouriers.setText(courierCount + " active");
     }
 
-    /**
-     * Rebuild the orders table inside the Sidebar.
-     * Controller passes rows — View only renders them.
-     */
     public void drawTable(List<OrderTableRow> rows) {
         ordersTableBox.getChildren().clear();
 
-        // ── Header ────────────────────────────────────────────────
         String[] headers = { "#",  "COURIER", "STATUS", "ETA", "DL", "SCORE" };
         double[] widths  = { 30,   62,         74,       40,   32,    52    };
-        // total = 30+62+74+40+32+52 = 290 + padding(6+6) = 302 → fits in 310
 
         HBox headerRow = new HBox();
         headerRow.setBackground(new Background(
@@ -221,69 +186,56 @@ public class MapView extends Application {
         }
         ordersTableBox.getChildren().add(headerRow);
 
-        // ── Data rows ─────────────────────────────────────────────
         for (int r = 0; r < rows.size(); r++) {
             OrderTableRow row = rows.get(r);
 
             HBox dataRow = new HBox();
             dataRow.setPadding(new Insets(5, 6, 5, 6));
-            Color rowBg = r % 2 == 0
-                    ? Color.web("#12141A")
-                    : Color.web("#15181F");
+            Color rowBg = r % 2 == 0 ? Color.web("#12141A") : Color.web("#15181F");
             dataRow.setBackground(new Background(
                     new BackgroundFill(rowBg, CornerRadii.EMPTY, null)));
 
-            // Status dot colour
             Color statusColor = switch (row.status) {
-                case "ASSIGNED"  -> Color.web("#818CF8"); // indigo
+                case "ASSIGNED"  -> Color.web("#818CF8");
                 case "PICKED UP" -> Color.web("#FCD34D");
                 case "DELIVERED" -> Color.web("#6B7280");
                 default          -> CUSTOMER_C;
             };
 
-            // Col 0: ID with coloured dot
             Label idLbl = new Label("●  #" + row.orderId);
             idLbl.setMinWidth(widths[0] + 10);
             idLbl.setMaxWidth(widths[0] + 10);
             idLbl.setTextFill(statusColor);
             idLbl.setFont(Font.font("Helvetica Neue", FontWeight.BOLD, 11));
 
-            // Col 1: Courier
             Label courierLbl = new Label(row.courierLabel);
             courierLbl.setMinWidth(widths[1]);
             courierLbl.setMaxWidth(widths[1]);
-            courierLbl.setTextFill(
-                    row.courierLabel.equals("—") ? TEXT_DIM : COURIER_C);
+            courierLbl.setTextFill(row.courierLabel.equals("—") ? TEXT_DIM : COURIER_C);
             courierLbl.setFont(Font.font("Helvetica Neue", FontWeight.BOLD, 11));
 
-            // Col 2: Status badge
             Label statusLbl = new Label(row.status);
             statusLbl.setMinWidth(widths[2]);
             statusLbl.setMaxWidth(widths[2]);
             statusLbl.setTextFill(statusColor);
             statusLbl.setFont(Font.font("Helvetica Neue", FontWeight.BOLD, 10));
 
-            // Col 3: ETA
             Label etaLbl = new Label(row.eta);
             etaLbl.setMinWidth(widths[3]);
             etaLbl.setMaxWidth(widths[3]);
             etaLbl.setTextFill(row.isLate ? LATE_COLOR : TEXT_PRIMARY);
             etaLbl.setFont(Font.font("Helvetica Neue", 11));
 
-            // Col 4: Deadline
             Label dlLbl = new Label("" + row.deadline);
             dlLbl.setMinWidth(widths[4]);
             dlLbl.setMaxWidth(widths[4]);
             dlLbl.setTextFill(row.isLate ? LATE_COLOR : TEXT_DIM);
             dlLbl.setFont(Font.font("Helvetica Neue", 11));
 
-            // Col 5: Score — shown only while WAITING, dim otherwise
             Label scoreLbl = new Label(row.score);
             scoreLbl.setMinWidth(widths[5]);
             scoreLbl.setMaxWidth(widths[5]);
-            scoreLbl.setTextFill(row.score.equals("—")
-                    ? TEXT_DIM
-                    : Color.web("#A78BFA")); // purple — clearly a debug value
+            scoreLbl.setTextFill(row.score.equals("—") ? TEXT_DIM : Color.web("#A78BFA"));
             scoreLbl.setFont(Font.font("Helvetica Neue", 10));
 
             dataRow.getChildren().addAll(idLbl, courierLbl, statusLbl, etaLbl, dlLbl, scoreLbl);
@@ -291,15 +243,13 @@ public class MapView extends Application {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  PRIVATE DRAWING HELPERS — pure rendering, zero logic
-    // ══════════════════════════════════════════════════════════════
+    // ── Drawing helpers ───────────────────────────────────────────
 
     private void drawRoads(GraphicsContext gc, Graph graph) {
         for (int fromId : graph.nodeIds()) {
             Node from = graph.getNode(fromId);
             for (Graph.Edge edge : graph.getEdges(fromId)) {
-                if (edge.getTo() <= fromId) continue; // each road once
+                if (edge.getTo() <= fromId) continue;
                 Node to = graph.getNode(edge.getTo());
                 if (to == null) continue;
 
@@ -332,7 +282,6 @@ public class MapView extends Application {
         if (rest == null) return;
         Node n = rest.getLocation();
 
-        // Glow rings
         for (int i = 4; i >= 1; i--) {
             gc.setFill(Color.color(RESTAURANT_C.getRed(),
                     RESTAURANT_C.getGreen(), RESTAURANT_C.getBlue(), 0.05 * i));
@@ -340,16 +289,13 @@ public class MapView extends Application {
             gc.fillOval(n.getX() - g, n.getY() - g, g * 2, g * 2);
         }
 
-        // Background square
         gc.setFill(RESTAURANT_C);
         gc.fillRoundRect(n.getX() - 14, n.getY() - 14, 28, 28, 6, 6);
 
-        // Clear "R" letter in the centre
         gc.setFill(Color.WHITE);
         gc.setFont(Font.font("Helvetica Neue", FontWeight.BOLD, 16));
         gc.fillText("R", n.getX() - 5, n.getY() + 6);
 
-        // Name label to the right
         gc.setFill(TEXT_PRIMARY);
         gc.setFont(Font.font("Helvetica Neue", FontWeight.BOLD, 11));
         gc.fillText(rest.getName(), n.getX() + 17, n.getY() + 4);
@@ -362,7 +308,7 @@ public class MapView extends Application {
 
             Color c = switch (o.getStatus()) {
                 case WAITING   -> CUSTOMER_C;
-                case ASSIGNED  -> Color.web("#818CF8"); // indigo — assigned but not picked up yet
+                case ASSIGNED  -> Color.web("#818CF8");
                 case PICKED_UP -> Color.web("#FCD34D");
                 case DELIVERED -> Color.web("#6B7280");
             };
@@ -379,61 +325,89 @@ public class MapView extends Application {
         }
     }
 
+    /**
+     * Draw all couriers with smooth edge-traversal animation.
+     *
+     * Position interpolation (while on an edge):
+     *   fraction = (edgeTicksDone - 1 + animProgress) / edgeTicksTotal
+     *
+     * This is continuous across ticks:
+     *   end of tick T   (animProgress=1): fraction = edgeTicksDone / edgeTicksTotal
+     *   start of tick T+1 (animProgress=0): fraction = edgeTicksDone / edgeTicksTotal ✓
+     *
+     * When the courier is idle or waiting, it is drawn at currentNode.
+     */
     private void drawCouriers(GraphicsContext gc, List<Courier> couriers,
                               double progress) {
         for (int idx = 0; idx < couriers.size(); idx++) {
             Courier c   = couriers.get(idx);
             Node    cur = c.getCurrentNode();
-            Node    prev = c.getPreviousNode();
             if (cur == null) continue;
 
-            // Interpolate position between ticks for smooth animation
+            // ── Smooth position along the current edge ────────────
             double x, y;
-            if (prev != null && !prev.equals(cur) && progress < 1.0) {
-                x = prev.getX() + (cur.getX() - prev.getX()) * progress;
-                y = prev.getY() + (cur.getY() - prev.getY()) * progress;
+
+            Node edgeOrigin = c.getEdgeOriginNode();
+            Node edgeDest   = c.getEdgeDestNode();
+            int  ticksDone  = c.getEdgeTicksDone();
+            int  ticksTotal = c.getEdgeTicksTotal();
+
+            boolean onEdge = edgeOrigin != null && edgeDest != null
+                    && ticksTotal > 0
+                    && c.getStatus() != Courier.Status.AVAILABLE
+                    && c.getStatus() != Courier.Status.WAITING_AT_RESTAURANT;
+
+            if (onEdge) {
+                // fraction ∈ [0, 1] across the full edge duration
+                // (edgeTicksDone - 1 + animProgress) / edgeTicksTotal
+                //  → 0 at the very start of the edge (tick 1, animProgress=0)
+                //  → 1 at the very end  of the edge (last tick, animProgress=1)
+                double fraction = (ticksDone - 1 + progress) / ticksTotal;
+                fraction = Math.max(0.0, Math.min(1.0, fraction));
+                x = edgeOrigin.getX() + (edgeDest.getX() - edgeOrigin.getX()) * fraction;
+                y = edgeOrigin.getY() + (edgeDest.getY() - edgeOrigin.getY()) * fraction;
             } else {
                 x = cur.getX();
                 y = cur.getY();
             }
 
-            // Small offset so couriers on same node don't overlap
+            // Small lateral offset so couriers on the same node don't overlap
             x += (idx % 2 == 0 ? -1 : 1) * (idx * 8.0);
 
-            // Colour by status
+            // ── Status colour ─────────────────────────────────────
             Color fill = switch (c.getStatus()) {
-                case AVAILABLE              -> Color.web("#6B7280");
-                case HEADING_TO_RESTAURANT  -> COURIER_C;
-                case WAITING_AT_RESTAURANT  -> Color.web("#FCD34D");
-                case DELIVERING             -> Color.web("#F97316");
+                case AVAILABLE             -> Color.web("#6B7280");
+                case HEADING_TO_RESTAURANT -> COURIER_C;
+                case WAITING_AT_RESTAURANT -> Color.web("#FCD34D");
+                case DELIVERING            -> Color.web("#F97316");
             };
 
-            // Motion trail — only when actually moving
-            if (prev != null && !prev.equals(cur) &&
-                    c.getStatus() != Courier.Status.AVAILABLE &&
-                    c.getStatus() != Courier.Status.WAITING_AT_RESTAURANT) {
+            // ── Motion trail (drawn along the current edge) ───────
+            if (onEdge && c.getStatus() != Courier.Status.AVAILABLE
+                    && c.getStatus() != Courier.Status.WAITING_AT_RESTAURANT) {
                 gc.setStroke(Color.color(fill.getRed(), fill.getGreen(), fill.getBlue(), 0.15));
                 gc.setLineWidth(2);
-                gc.strokeLine(prev.getX(), prev.getY(), cur.getX(), cur.getY());
+                gc.strokeLine(edgeOrigin.getX(), edgeOrigin.getY(),
+                        edgeDest.getX(),   edgeDest.getY());
             }
 
-            // Glow
+            // ── Glow ──────────────────────────────────────────────
             gc.setFill(Color.color(fill.getRed(), fill.getGreen(), fill.getBlue(), 0.2));
             gc.fillOval(x - 16, y - 16, 32, 32);
 
-            // Triangle (slightly larger)
+            // ── Triangle ──────────────────────────────────────────
             gc.setFill(fill);
             gc.fillPolygon(
                     new double[]{ x,      x - 11,  x + 11 },
                     new double[]{ y - 12, y + 8,   y + 8  },
                     3);
 
-            // ID
+            // ── ID ────────────────────────────────────────────────
             gc.setFill(Color.BLACK);
             gc.setFont(Font.font("Helvetica Neue", FontWeight.BOLD, 9));
             gc.fillText(String.valueOf(c.getId()), x - 3, y + 5);
 
-            // Status label
+            // ── Status label ──────────────────────────────────────
             String label = switch (c.getStatus()) {
                 case AVAILABLE             -> "idle";
                 case HEADING_TO_RESTAURANT -> "→ rest.";
@@ -449,7 +423,6 @@ public class MapView extends Application {
     private void drawLegend(GraphicsContext gc) {
         double x = 14, y = MAP_H - 100;
 
-        // Compact background
         gc.setFill(Color.web("#12141A", 0.88));
         gc.fillRoundRect(x - 4, y - 12, 220, 95, 8, 8);
 
@@ -458,7 +431,6 @@ public class MapView extends Application {
         gc.fillText("LEGEND", x, y - 1);
         y += 10;
 
-        // Two columns: left = locations, right = order statuses
         Object[][] left = {
                 { RESTAURANT_C,          "Restaurant"   },
                 { Color.web("#6B7280"),  "Courier idle" },
@@ -495,9 +467,7 @@ public class MapView extends Application {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  SIDEBAR & BOTTOM BAR — UI structure only, no logic
-    // ══════════════════════════════════════════════════════════════
+    // ── Sidebar & bottom bar ──────────────────────────────────────
 
     private VBox buildSidebar() {
         lblTime     = styledLabel("t = 0");
@@ -511,7 +481,6 @@ public class MapView extends Application {
         title.setTextFill(ACCENT);
         title.setFont(Font.font("Helvetica Neue", FontWeight.BOLD, 13));
 
-        // Orders table container — rows are added by drawTable()
         Label tableTitle = new Label("ORDERS");
         tableTitle.setTextFill(TEXT_DIM);
         tableTitle.setFont(Font.font("Helvetica Neue", FontWeight.BOLD, 10));
@@ -520,10 +489,24 @@ public class MapView extends Application {
         ordersTableBox.setBackground(new Background(
                 new BackgroundFill(Color.web("#0E1016"), new CornerRadii(4), null)));
 
-        VBox tableSection = new VBox(6, tableTitle, ordersTableBox);
+        // Wrap the orders table in a ScrollPane so it doesn't push
+        // the bottom bar off-screen when there are many orders.
+        ScrollPane tableScroll = new ScrollPane(ordersTableBox);
+        tableScroll.setFitToWidth(true);
+        tableScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        tableScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        tableScroll.setStyle(
+                "-fx-background: #0E1016;" +
+                        "-fx-background-color: #0E1016;" +
+                        "-fx-border-color: transparent;");
+
+        VBox tableSection = new VBox(6, tableTitle, tableScroll);
         tableSection.setPadding(new Insets(10));
         tableSection.setBackground(new Background(
                 new BackgroundFill(PANEL_BG, new CornerRadii(6), null)));
+
+        // Let the table section grow to fill remaining vertical space.
+        VBox.setVgrow(tableSection, Priority.ALWAYS);
 
         VBox box = new VBox(12, title,
                 sectionPanel("⏱  Time",     lblTime),
@@ -542,15 +525,12 @@ public class MapView extends Application {
         btnStart = styledButton("▶  Start", ACCENT);
         Button btnRegen = styledButton("⟳  New City", Color.web("#4B5563"));
 
-        // Toggle simulation — View tells Controller to start/pause,
-        // Controller owns the running state and the loop
         btnStart.setOnAction(e -> {
             boolean nowRunning = !controller.isRunning();
             controller.setRunning(nowRunning);
             btnStart.setText(nowRunning ? "⏸  Pause" : "▶  Start");
         });
 
-        // View forwards the click — Controller makes all the decisions
         btnRegen.setOnAction(e -> {
             btnStart.setText("▶  Start");
             controller.regenerateCity();

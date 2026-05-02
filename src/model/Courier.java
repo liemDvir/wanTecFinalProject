@@ -7,28 +7,56 @@ public class Courier {
 
     private int          id;
     private String       controlArea;
-    private String       currentLocation;   // human-readable label
-    private Node         currentNode;       // actual position on the graph
-    private Node         previousNode;      // position before last move — for smooth animation
+    private String       currentLocation;
+    private Node         currentNode;
+    private Node         previousNode;
     private int          estimatedAvailableTimeMinutes;
     private List<String> routePlan;
     private int          capacity;
     private int          currentCapacity;
     private Status       status;
 
-    // The path the courier is currently walking, node by node.
-    // index 0 = next node to move to, last = destination.
-    // Set by Controller via Dijkstra before the courier starts moving.
-    private List<Node>   currentPath;
+    // The raw Dijkstra path (one node per edge hop, no repetition).
+    private List<Node>    currentPath   = new ArrayList<>();
 
-    // The order the courier is currently carrying (null if none)
-    private Order        activeOrder;
+    // Parallel list: edgeTicksList.get(i) = ticks required to reach currentPath.get(i)
+    // from the previous node.  Set by Controller alongside currentPath.
+    private List<Integer> edgeTicksList = new ArrayList<>();
+
+    // ── Edge-traversal animation state ───────────────────────────
+    // These fields let the View render smooth movement along any edge,
+    // regardless of how many ticks that edge takes.
+    //
+    // Invariant while a courier is MOVING:
+    //   edgeOriginNode  = the node the courier started this edge from
+    //   edgeDestNode    = the node the courier is heading toward (currentPath[0])
+    //   edgeTicksTotal  = total ticks this edge requires  (≥ 1)
+    //   edgeTicksDone   = ticks spent on this edge so far (1 … edgeTicksTotal)
+    //
+    // Visual position formula (used by MapView):
+    //   fraction = (edgeTicksDone - 1 + animProgress) / edgeTicksTotal
+    //   x = edgeOriginNode.x + (edgeDestNode.x - edgeOriginNode.x) * fraction
+    //
+    // This gives continuous, smooth movement:
+    //   • At animProgress=0 the courier is exactly where last tick ended.
+    //   • At animProgress=1 the courier is where this tick ends.
+    private Node    edgeOriginNode = null;
+    private Node    edgeDestNode   = null;
+    private int     edgeTicksTotal = 1;
+    private int     edgeTicksDone  = 0;
+
+    // Set to true when an edge completes so the NEXT stepForward() call
+    // starts the following edge cleanly without losing the animation data
+    // needed for the completion tick.
+    private boolean edgeCompleted  = false;
+
+    private Order activeOrder;
 
     public enum Status {
-        AVAILABLE,              // idle, waiting for an assignment
-        HEADING_TO_RESTAURANT,  // walking toward the restaurant to pick up
-        WAITING_AT_RESTAURANT,  // at the restaurant, food not ready yet
-        DELIVERING              // walking toward the customer
+        AVAILABLE,
+        HEADING_TO_RESTAURANT,
+        WAITING_AT_RESTAURANT,
+        DELIVERING
     }
 
     // ── Full constructor ─────────────────────────────────────────
@@ -43,7 +71,6 @@ public class Courier {
         setCapacity(capacity);
         setCurrentCapacity(currentCapacity);
         setStatus(status);
-        this.currentPath = new ArrayList<>();
     }
 
     // ── Convenience constructor (currentCapacity defaults to 0) ──
@@ -75,23 +102,96 @@ public class Courier {
     public void         setCurrentCapacity(int c)               { this.currentCapacity = c; }
     public Status       getStatus()                             { return status; }
     public void         setStatus(Status s)                     { this.status = s; }
-    public List<Node>   getCurrentPath()                        { return currentPath; }
-    public void         setCurrentPath(List<Node> path)         { this.currentPath = path; }
     public Order        getActiveOrder()                        { return activeOrder; }
     public void         setActiveOrder(Order o)                 { this.activeOrder = o; }
 
-    // ── Movement helpers (called by Controller each tick) ────────
+    // ── Path setters ─────────────────────────────────────────────
 
     /**
-     * Move one step forward along currentPath.
-     * Saves the current node as previousNode before moving —
-     * the View uses both to interpolate smooth animation.
-     * Returns true if the courier reached the destination.
+     * Set the courier's path together with the per-edge tick counts.
+     *
+     * @param path      raw Dijkstra path (list of destination nodes)
+     * @param ticksList parallel list; ticksList.get(i) = ticks to reach path.get(i)
+     *                  from the previous node.  May be null / empty (defaults to 1/edge).
+     */
+    public void setCurrentPath(List<Node> path, List<Integer> ticksList) {
+        this.currentPath    = (path      != null) ? path      : new ArrayList<>();
+        this.edgeTicksList  = (ticksList != null) ? ticksList : new ArrayList<>();
+        this.edgeDestNode   = null;
+        this.edgeOriginNode = null;
+        this.edgeCompleted  = false;
+        this.edgeTicksDone  = 0;
+        this.edgeTicksTotal = 1;
+    }
+
+    /** Backward-compatible single-argument setter (no weight info — 1 tick/edge). */
+    public void setCurrentPath(List<Node> path) {
+        setCurrentPath(path, new ArrayList<>());
+    }
+
+    public List<Node> getCurrentPath() { return currentPath; }
+
+    // ── Animation-state getters (read by MapView) ─────────────────
+    public Node getEdgeOriginNode() { return edgeOriginNode; }
+    public Node getEdgeDestNode()   { return edgeDestNode;   }
+    public int  getEdgeTicksDone()  { return edgeTicksDone;  }
+    public int  getEdgeTicksTotal() { return edgeTicksTotal; }
+
+    // ── Movement helpers ──────────────────────────────────────────
+
+    /**
+     * Advance the courier by one simulation tick along its current path.
+     *
+     * How it works
+     * ────────────
+     * Rather than moving one node per tick (which ignores edge weights), the
+     * courier tracks an ongoing edge traversal:
+     *
+     *   • On each tick edgeTicksDone is incremented.
+     *   • The courier only moves to the next node when edgeTicksDone reaches
+     *     edgeTicksTotal (the rounded edge weight in ticks).
+     *   • edgeCompleted is set to true on the arrival tick so that the
+     *     completion tick's animation can still show the final leg of the
+     *     journey (edgeDestNode / edgeTicksTotal are preserved for that tick).
+     *     On the NEXT stepForward() call the new edge initialises cleanly.
+     *
+     * Animation formula used by MapView:
+     *   fraction = (edgeTicksDone - 1 + animProgress) / edgeTicksTotal
+     *   where animProgress ∈ [0,1] across the 600ms tick window.
+     *
+     * @return true when the courier has reached the end of its path.
      */
     public boolean stepForward() {
         if (currentPath == null || currentPath.isEmpty()) return true;
-        previousNode = currentNode;           // remember where we came from
-        currentNode  = currentPath.remove(0); // move to next node
+
+        // ── Start a new edge ──────────────────────────────────────
+        // Triggered on the very first call, and after each edge completes.
+        if (edgeCompleted || edgeDestNode == null) {
+            edgeCompleted  = false;
+            edgeOriginNode = currentNode;
+            edgeDestNode   = currentPath.get(0);
+            edgeTicksTotal = edgeTicksList.isEmpty() ? 1 : edgeTicksList.get(0);
+            edgeTicksDone  = 0;
+        }
+
+        edgeTicksDone++;
+
+        if (edgeTicksDone < edgeTicksTotal) {
+            // Still traversing this edge — don't move currentNode yet.
+            return false;
+        }
+
+        // ── Edge complete — advance to destination node ───────────
+        previousNode = currentNode;
+        currentNode  = currentPath.remove(0);
+        if (!edgeTicksList.isEmpty()) edgeTicksList.remove(0);
+
+        // Mark completed so next call initialises the following edge.
+        // We intentionally keep edgeDestNode and edgeTicksDone unchanged
+        // so that the MapView can render the final 1-tick leg of the journey
+        // during this tick's 600ms animation window.
+        edgeCompleted = true;
+
         return currentPath.isEmpty();
     }
 
@@ -102,22 +202,14 @@ public class Courier {
 
     // ── Order management ─────────────────────────────────────────
 
-    /**
-     * Assign an order — stores it as activeOrder and updates routePlan.
-     * Status is set to HEADING_TO_RESTAURANT by the Controller.
-     */
     public void assignOrder(Order order) {
         if (routePlan == null) routePlan = new ArrayList<>();
         routePlan.add("PICKUP:"  + order.getId());
         routePlan.add("DROPOFF:" + order.getId());
         currentCapacity++;
         activeOrder = order;
-        // Controller will set status + path after calling this
     }
 
-    /**
-     * Complete the active delivery — remove it and become available again.
-     */
     public void completeDelivery() {
         if (routePlan != null) {
             routePlan.remove("PICKUP:"  + (activeOrder != null ? activeOrder.getId() : ""));
@@ -126,10 +218,15 @@ public class Courier {
         currentCapacity = 0;
         activeOrder     = null;
         currentPath     = new ArrayList<>();
+        edgeTicksList   = new ArrayList<>();
+        edgeOriginNode  = null;
+        edgeDestNode    = null;
+        edgeTicksDone   = 0;
+        edgeTicksTotal  = 1;
+        edgeCompleted   = false;
         setStatus(Status.AVAILABLE);
     }
 
-    /** True when the courier can still take another order. */
     public boolean hasCapacity() { return currentCapacity < capacity; }
 
     @Override public String toString() {

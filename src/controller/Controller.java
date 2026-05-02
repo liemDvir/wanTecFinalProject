@@ -1,5 +1,6 @@
 package controller;
 
+import algorithm.GeneticAlgorithm;
 import javafx.application.Application;
 import model.*;
 import view.MapGenerator;
@@ -11,442 +12,457 @@ import java.util.*;
  * ═══════════════════════════════════════════════════
  *  Controller — the C in MVC.
  *
- *  THE ONLY place in the program where decisions are made:
- *    - How to build the city (where restaurant goes,
- *      where couriers start, where customers are).
- *    - Which courier gets which order.
- *    - When to advance the simulation clock.
- *    - When to tell the View to redraw.
- *
- *  Rules:
- *    - Never draws anything (calls View methods only).
- *    - Creates and owns the Model.
- *    - Passes data to the View — View never pulls from Model.
+ *  Dynamic simulation:
+ *    - Restaurant is placed at a RANDOM node.
+ *    - Initial orders are randomly generated (2–5).
+ *    - Every ~10 ticks, 1–2 NEW orders are spawned at random locations.
+ *    - The GA runs at tick 0 and re-plans whenever new orders appear
+ *      and there are available couriers.
  * ═══════════════════════════════════════════════════
  */
 public class Controller {
 
-    // ── Configuration — all tunable constants live here ──────────
+    // ── Grid / display ────────────────────────────────────────────
     private static final int    GRID_COLS         = 7;
     private static final int    GRID_ROWS         = 5;
     private static final double MAP_WIDTH         = 780;
     private static final double MAP_HEIGHT        = 620;
-    private static final int    NUM_COURIERS      = 2;
-    private static final int    NUM_CUSTOMERS     = 3;
-    private static final int    COURIER_CAPACITY  = 3;
-    private static final int    DEFAULT_PREP_TIME = 12;
-    private static final int    MAX_WAIT_MINUTES  = 60;
-    private static final int    ORDER_DEADLINE    = 45;
+
+    // ── Simulation parameters ─────────────────────────────────────
+    private static final int    NUM_COURIERS       = 2;
+    private static final int    COURIER_CAPACITY   = 5;
+    private static final int    DEFAULT_PREP_TIME  = 12;
+    private static final int    ORDER_DEADLINE     = 45;
+
+    // Initial order count: random between these bounds (inclusive).
+    private static final int    INIT_ORDERS_MIN    = 2;
+    private static final int    INIT_ORDERS_MAX    = 5;
+
+    // New-order spawning window (ticks).
+    // Every SPAWN_WINDOW ticks, 1–2 new orders are created at a random
+    // tick inside that window (not always at the boundary).
+    private static final int    SPAWN_WINDOW       = 10;
+    private static final int    SPAWN_MIN          = 1;   // min orders per wave
+    private static final int    SPAWN_MAX          = 2;   // max orders per wave
+
+    // GA re-planning interval (ticks).
+    private static final int    GA_INTERVAL        = 10;
+
+    // ── State ─────────────────────────────────────────────────────
+    private final Random rng = new Random();
 
     private Model   model;
     private MapView view;
     private boolean running = false;
 
-    // Stores the last computed score per order id — for debug display in the table
-    private final Map<Integer, Double> lastScores = new HashMap<>();
+    /** Fires GA at tick 0 (initialised to GA_INTERVAL). */
+    private int ticksSinceLastGA = GA_INTERVAL;
 
-    private static final long TICK_INTERVAL_NS = 600_000_000L; // 600ms per tick
+    /** Running order-ID counter (never resets within a city). */
+    private int nextOrderId = 1;
+
+    /** The exact tick at which the next wave of orders will spawn.
+     *  Randomly chosen inside each SPAWN_WINDOW interval. */
+    private int nextSpawnTick = -1;
+
+    /** True when new orders were just spawned this tick → force GA. */
+    private boolean newOrdersThisTick = false;
+
+    private final Map<Integer, Deque<GeneticAlgorithm.RouteAction>> courierPlans   = new HashMap<>();
+    private final Map<Integer, List<Order>>                          courierCarried = new HashMap<>();
+    private final Map<Integer, Double>                               lastScores     = new HashMap<>();
+
+    private static final long TICK_INTERVAL_NS = 600_000_000L;
 
     // ── Bootstrap ─────────────────────────────────────────────────
 
-    /**
-     * Called by Main.
-     * Builds the model, then launches the JavaFX window.
-     */
     public void start(String[] args) {
         model = buildCity();
         MapView.setController(this);
         Application.launch(MapView.class, args);
     }
 
-    /**
-     * Called by MapView once the window is open and ready.
-     *
-     * The Controller starts its own simulation thread here.
-     * The thread runs the loop — on every tick it calls tick(),
-     * then uses Platform.runLater() to push the result to the GUI.
-     *
-     * This way the Controller drives the GUI, not the other way around.
-     * The View never wakes up on its own — it only reacts to Controller calls.
-     */
     public void onViewReady(MapView view) {
         this.view = view;
-
-        // Draw initial state immediately
         refreshView();
-
-        // Controller owns the simulation thread.
-        // Platform.runLater() ensures all GUI calls happen on the JavaFX thread.
-        Thread simulationThread = new Thread(() -> {
+        Thread t = new Thread(() -> {
             while (true) {
-                try {
-                    Thread.sleep(TICK_INTERVAL_NS / 1_000_000); // convert ns → ms
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-
-                if (!running) continue; // paused — skip tick but keep thread alive
-
-                // Run logic on the simulation thread
+                try { Thread.sleep(TICK_INTERVAL_NS / 1_000_000); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                if (!running) continue;
                 tick();
-
-                // Push GUI update to the JavaFX thread
                 javafx.application.Platform.runLater(this::refreshView);
             }
         });
-
-        // Daemon thread — shuts down automatically when the app closes
-        simulationThread.setDaemon(true);
-        simulationThread.start();
+        t.setDaemon(true);
+        t.start();
     }
 
-    // ── Simulation control (called by View buttons) ───────────────
+    public void setRunning(boolean r) { this.running = r; }
+    public boolean isRunning()        { return running; }
 
-    /** Start or pause the simulation. */
-    public void setRunning(boolean running) { this.running = running; }
-    public boolean isRunning()              { return running; }
+    // ── City construction ─────────────────────────────────────────
 
-    // ── City construction — ALL decisions made here ───────────────
+    public void buildCityForTest() { model = buildCity(); }
 
-    /**
-     * Test-only entry point — builds the city without launching JavaFX.
-     * Allows unit tests to call tick() and inspect the model directly.
-     */
-    public void buildCityForTest() {
-        model = buildCity();
-        // view remains null — refreshView() guards against this
-    }
-    /**
-     * Build a complete city:
-     *   1. Ask MapGenerator for a Graph (pure street layout).
-     *   2. Decide where the restaurant goes (most central node).
-     *   3. Decide where couriers start (near the restaurant).
-     *   4. Decide where customer dropoffs are (far from restaurant).
-     *   5. Create all model objects and populate the Model.
-     */
     private Model buildCity() {
         Model        m         = new Model();
         MapGenerator generator = new MapGenerator(GRID_COLS, GRID_ROWS, MAP_WIDTH, MAP_HEIGHT);
         Graph        graph     = generator.buildGraph();
         m.setGraph(graph);
 
-        List<Node> allNodes = new ArrayList<>();
-        for (int id : graph.nodeIds()) allNodes.add(graph.getNode(id));
+        List<Node> all = new ArrayList<>();
+        for (int id : graph.nodeIds()) all.add(graph.getNode(id));
 
-        // ── Decision: restaurant at the most central node ─────────
-        // TODO - RANDOM Restaurant OR THE USER DECIDE WHERE THE Restaurant WILL BE
-        Node restaurantNode = pickCentralNode(allNodes);
-        Restaurant restaurant = new Restaurant(1, "Trattoria Roma",
-                restaurantNode, DEFAULT_PREP_TIME);
-        m.setRestaurant(restaurant);
+        // ── Random restaurant location ────────────────────────────
+        Node restaurantNode = all.get(rng.nextInt(all.size()));
+        m.setRestaurant(new Restaurant(1, "Trattoria Roma", restaurantNode, DEFAULT_PREP_TIME));
 
-        // ── Decision: couriers start near the restaurant ──────────
-        // TODO - RANDOM PLACE TO START OR THE USER DECIDE WHERE THE COURIERS WILL BE
-        List<Node> nearNodes = nodesNear(restaurantNode, allNodes, NUM_COURIERS);
+        // ── Couriers start near the restaurant ────────────────────
+        List<Node> near = nodesNear(restaurantNode, all, NUM_COURIERS);
         for (int i = 0; i < NUM_COURIERS; i++) {
-            Node    start   = nearNodes.get(i);
-            Courier courier = new Courier(
-                    i + 1,
-                    "Zone-" + (i + 1),
-                    "Node-" + start.getId(),
-                    0,
-                    new ArrayList<>(),
-                    COURIER_CAPACITY,
-                    Courier.Status.AVAILABLE
-            );
-            courier.setCurrentNode(start); // store actual Node for Dijkstra
-            m.addCourier(courier);
+            Node s = near.get(i);
+            Courier c = new Courier(i + 1, "Zone-" + (i + 1), "Node-" + s.getId(),
+                    0, new ArrayList<>(), COURIER_CAPACITY, Courier.Status.AVAILABLE);
+            c.setCurrentNode(s);
+            m.addCourier(c);
         }
 
-        // ── Decision: customers placed far from the restaurant ────
-        // TODO - RANDOM PLACE OR THE USER DECIDE WHERE THE CUSTOMER WILL BE
-        List<Node> farNodes = nodesFar(restaurantNode, allNodes, NUM_CUSTOMERS);
-        for (int i = 0; i < NUM_CUSTOMERS; i++) {
-            Node dropoff  = farNodes.get(i);
-            int  orderT   = i * 2;                          // stagger order times
-            int  prepT    = DEFAULT_PREP_TIME + (i * 2);    // vary prep times
-            int  readyT   = orderT + prepT;
+        // ── Random initial orders ─────────────────────────────────
+        nextOrderId = 1;
+        int initCount = INIT_ORDERS_MIN + rng.nextInt(INIT_ORDERS_MAX - INIT_ORDERS_MIN + 1);
+        List<Node> candidates = new ArrayList<>(all);
+        candidates.remove(restaurantNode);
+        Collections.shuffle(candidates, rng);
+
+        for (int i = 0; i < initCount && i < candidates.size(); i++) {
+            Node dropoff = candidates.get(i);
+            int  orderT  = rng.nextInt(4);                                 // 0–3
+            int  prepT   = DEFAULT_PREP_TIME + rng.nextInt(6);             // 12–17
+            int  readyT  = orderT + prepT;
             int  deadline = readyT + ORDER_DEADLINE;
-            m.addOrder(new Order(
-                    i + 1,
-                    restaurantNode,
-                    dropoff,
-                    orderT, prepT, readyT, deadline,
-                    Order.Status.WAITING
-            ));
+            m.addOrder(new Order(nextOrderId++, restaurantNode, dropoff,
+                    orderT, prepT, readyT, deadline, Order.Status.WAITING));
         }
+
+        // Schedule the first spawn wave at a random tick inside [1, SPAWN_WINDOW].
+        scheduleNextSpawn(0);
+
+        System.out.printf("[INIT] Restaurant at node %d  |  %d initial orders  |  first spawn at t=%d%n",
+                restaurantNode.getId(), initCount, nextSpawnTick);
+        System.out.flush();
 
         return m;
     }
 
-    // ── Simulation tick — all logic here ─────────────────────────
+    // ── Order spawning ────────────────────────────────────────────
 
     /**
-     * Advance the simulation by one minute.
-     * Each tick does two things:
-     *   1. Assign new orders to available couriers.
-     *   2. Move every active courier one step along its path.
+     * Schedule the next spawn tick randomly inside the next SPAWN_WINDOW.
+     * @param windowStart the first tick of the current window
      */
+    private void scheduleNextSpawn(int windowStart) {
+        // Spawn at a random tick inside (windowStart, windowStart + SPAWN_WINDOW]
+        nextSpawnTick = windowStart + 1 + rng.nextInt(SPAWN_WINDOW);
+    }
+
+    /**
+     * Called every tick. If the current tick matches nextSpawnTick,
+     * spawn 1–2 new orders at random customer locations.
+     */
+    private void maybeSpawnOrders(int currentTime) {
+        newOrdersThisTick = false;
+
+        if (currentTime < nextSpawnTick) return;
+
+        int count = SPAWN_MIN + rng.nextInt(SPAWN_MAX - SPAWN_MIN + 1);
+
+        Graph graph = model.getGraph();
+        Node  restaurant = model.getRestaurant().getLocation();
+        List<Node> all = new ArrayList<>();
+        for (int id : graph.nodeIds()) all.add(graph.getNode(id));
+        all.remove(restaurant);
+        Collections.shuffle(all, rng);
+
+        // Avoid placing orders at the same node as an existing undelivered order.
+        Set<Integer> usedNodes = new HashSet<>();
+        for (Order o : model.getOrders())
+            if (!o.isDelivered() && o.getDropoff() != null)
+                usedNodes.add(o.getDropoff().getId());
+
+        int spawned = 0;
+        for (Node candidate : all) {
+            if (spawned >= count) break;
+            if (usedNodes.contains(candidate.getId())) continue;
+
+            int prepT    = DEFAULT_PREP_TIME + rng.nextInt(8);          // 12–19
+            int readyT   = currentTime + prepT;
+            int deadline = readyT + ORDER_DEADLINE + rng.nextInt(10);   // some variation
+
+            Order newOrder = new Order(nextOrderId++, restaurant, candidate,
+                    currentTime, prepT, readyT, deadline, Order.Status.WAITING);
+            model.addOrder(newOrder);
+            spawned++;
+
+            System.out.printf("[SPAWN] t=%d  Order #%d → node %d  (ready t=%d, deadline t=%d)%n",
+                    currentTime, newOrder.getId(), candidate.getId(), readyT, deadline);
+        }
+
+        if (spawned > 0) {
+            newOrdersThisTick = true;
+            System.out.flush();
+        }
+
+        // Schedule the next wave.
+        scheduleNextSpawn(currentTime);
+    }
+
+    // ── Main tick ─────────────────────────────────────────────────
+
     public void tick() {
         int time = model.getCurrentTime();
 
-        // Step 1: assign orders to idle couriers
-        for (Courier courier : model.getAvailableCouriers()) {
-            if (courier.getCurrentCapacity() >= courier.getCapacity()) continue;
-            Order best = pickBestOrder(courier, time);
-            if (best != null) assignOrder(courier, best);
+        // ── Step 0: possibly spawn new orders ─────────────────────
+        maybeSpawnOrders(time);
+
+        // ── Step 1: GA planning ───────────────────────────────────
+        // Runs at tick 0 (ticksSinceLastGA starts at GA_INTERVAL),
+        // every GA_INTERVAL ticks, AND immediately when new orders spawn.
+        ticksSinceLastGA++;
+        boolean gaTriggered = ticksSinceLastGA >= GA_INTERVAL || newOrdersThisTick;
+
+        if (gaTriggered) {
+            ticksSinceLastGA = 0;
+            List<Courier> available = model.getAvailableCouriers();
+            List<Order>   waiting   = model.getWaitingOrders();
+            if (!available.isEmpty() && !waiting.isEmpty()) {
+                GeneticAlgorithm.Chromosome best =
+                        runGeneticOptimization(available, waiting, time);
+                if (best != null) applyGeneticPlan(best, available);
+            }
         }
 
-        // Step 2: advance every courier one step
-        for (Courier courier : model.getCouriers()) {
-            advanceCourier(courier, time);
-        }
+        // ── Step 2: advance couriers ──────────────────────────────
+        for (Courier c : model.getCouriers()) advanceCourier(c, time);
 
+        // ── Step 3: clock ─────────────────────────────────────────
         model.advanceTime();
-        // refreshView() is called via Platform.runLater in the simulation loop —
-        // do NOT call it here directly (would run on the wrong thread)
     }
 
-    /**
-     * Move one courier one step forward according to its current status.
-     *
-     * HEADING_TO_RESTAURANT → walk toward restaurant
-     *   → on arrival: if food ready → DELIVERING, else WAITING_AT_RESTAURANT
-     *
-     * WAITING_AT_RESTAURANT → wait until readyTime
-     *   → once ready: set path to customer, status = DELIVERING
-     *
-     * DELIVERING → walk toward customer
-     *   → on arrival: mark order delivered, courier becomes AVAILABLE
-     */
+    // ── GA integration ────────────────────────────────────────────
+
+    private GeneticAlgorithm.Chromosome runGeneticOptimization(
+            List<Courier> available, List<Order> waiting, int time) {
+        printGaHeader(time, available.size(), waiting.size());
+        GeneticAlgorithm ga = new GeneticAlgorithm();
+        GeneticAlgorithm.Chromosome best = ga.run(available, waiting, model.getGraph(), time,
+                stats -> { System.out.println(stats.toLogLine()); System.out.flush(); });
+        if (best != null) printGaSummary(best, available);
+        return best;
+    }
+
+    private void applyGeneticPlan(GeneticAlgorithm.Chromosome best,
+                                  List<Courier> available) {
+        for (int ci = 0; ci < best.routes.size() && ci < available.size(); ci++) {
+            Courier courier = available.get(ci);
+            if (courier.getStatus() != Courier.Status.AVAILABLE) continue;
+
+            List<GeneticAlgorithm.RouteAction> route = best.routes.get(ci);
+            if (route.isEmpty()) continue;
+
+            for (GeneticAlgorithm.RouteAction a : route)
+                if (a.type == GeneticAlgorithm.ActionType.PICKUP && a.order.isWaiting())
+                    a.order.markAssigned();
+
+            courierPlans.put(courier.getId(),  new ArrayDeque<>(route));
+            courierCarried.put(courier.getId(), new ArrayList<>());
+            courier.setCurrentCapacity(0);
+            startNextPlanAction(courier);
+        }
+    }
+
+    // ── Courier state machine ─────────────────────────────────────
+
     private void advanceCourier(Courier courier, int currentTime) {
         switch (courier.getStatus()) {
-
             case HEADING_TO_RESTAURANT -> {
-                boolean arrived = courier.stepForward();
-                if (arrived) {
-                    // Fix: sync previousNode to currentNode so animation
-                    // doesn't replay the last step while waiting
+                if (courier.stepForward()) {
                     courier.setPreviousNode(courier.getCurrentNode());
-                    Order order = courier.getActiveOrder();
-                    if (currentTime >= order.getReadyTime()) {
-                        startDelivery(courier);
-                    } else {
-                        courier.setStatus(Courier.Status.WAITING_AT_RESTAURANT);
-                    }
+                    processRestaurantArrival(courier, currentTime);
                 }
             }
-
             case WAITING_AT_RESTAURANT -> {
-                // Fix: keep previousNode == currentNode so no animation plays
                 courier.setPreviousNode(courier.getCurrentNode());
-                Order order = courier.getActiveOrder();
-                if (order != null && currentTime >= order.getReadyTime()) {
-                    startDelivery(courier);
-                }
+                processRestaurantArrival(courier, currentTime);
             }
-
             case DELIVERING -> {
-                boolean arrived = courier.stepForward();
-                if (arrived) {
-                    Order order = courier.getActiveOrder();
-                    if (order != null) order.markDelivered();
-                    // Fix: sync previousNode before completing so no jump occurs
+                if (courier.stepForward()) {
                     courier.setPreviousNode(courier.getCurrentNode());
-                    courier.completeDelivery();
+                    processCustomerArrival(courier, currentTime);
                 }
             }
-
-            case AVAILABLE -> { /* nothing to do */ }
+            case AVAILABLE -> { /* idle */ }
         }
     }
 
-    /**
-     * Assign an order to a courier:
-     *   - Store the order on the courier.
-     *   - Compute the Dijkstra path to the restaurant.
-     *   - Set status to HEADING_TO_RESTAURANT.
-     *
-     * Note: order is kept as WAITING until the courier actually picks it up
-     * at the restaurant — markPickedUp() is called in startDelivery().
-     */
-    private void assignOrder(Courier courier, Order order) {
-        courier.assignOrder(order);
+    private void processRestaurantArrival(Courier courier, int currentTime) {
+        Deque<GeneticAlgorithm.RouteAction> plan = courierPlans.get(courier.getId());
+        if (plan == null || plan.isEmpty()) { finishCourierPlan(courier); return; }
 
-        // Mark as ASSIGNED immediately — no other courier can claim it now
-        order.markAssigned();
-
-        // Guard: if courier has no position yet, place it at the restaurant
-        if (courier.getCurrentNode() == null) {
-            courier.setCurrentNode(order.getPickup());
-        }
-
-        Graph      graph = model.getGraph();
-        List<Node> path  = graph.getShortestPath(
-                courier.getCurrentNode().getId(),
-                order.getPickup().getId());
-
-        courier.setCurrentPath(path);
-        courier.setStatus(Courier.Status.HEADING_TO_RESTAURANT);
-    }
-
-    /**
-     * Called when the courier arrives at the restaurant and food is ready.
-     * Computes the delivery path and sends the courier toward the customer.
-     */
-    private void startDelivery(Courier courier) {
-        Order      order = courier.getActiveOrder();
-        Graph      graph = model.getGraph();
-        List<Node> path  = graph.getShortestPath(
-                order.getPickup().getId(),
-                order.getDropoff().getId());
-
-        order.markPickedUp();
-        courier.setCurrentPath(path);
-        courier.setStatus(Courier.Status.DELIVERING);
-    }
-
-    /**
-     * Decision: find the best unassigned order for this courier.
-     *
-     * Scoring (lower = better) — weighted sum of 4 factors in priority order:
-     *
-     *   1. Time until deadline           (weight 4) — most urgent first
-     *   2. Courier distance to restaurant(weight 3) — how far the courier must travel to pick up
-     *   3. Restaurant readyTime          (weight 2) — food almost ready preferred
-     *   4. Restaurant to customer dist.  (weight 1) — shorter delivery preferred
-     *
-     * All distance factors use Dijkstra on the city graph.
-     * An order is skipped if:
-     *   - The courier cannot reach the restaurant before the deadline.
-     *   - The courier would have to wait > MAX_WAIT_MINUTES for the food.
-     */
-    private Order pickBestOrder(Courier courier, int currentTime) {
-        Graph  graph      = model.getGraph();
-        Node   courierPos = courier.getCurrentNode();
-
-        Order  best      = null;
-        double bestScore = Double.MAX_VALUE;
-
-        for (Order order : model.getWaitingOrders()) {
-
-            Node pickup  = order.getPickup();   // restaurant node
-            Node dropoff = order.getDropoff();  // customer node
-
-            // ── Factor 2: courier → restaurant (travel time) ──────
-            double courierToRestaurant = (courierPos != null && graph != null)
-                    ? graph.shortestTime(courierPos.getId(), pickup.getId())
-                    : 0;
-
-            // Earliest minute the courier can be at the restaurant
-            double arrivalAtRestaurant = currentTime + courierToRestaurant;
-
-            // Earliest minute the courier can actually pick up
-            // (must wait if food isn't ready yet)
-            double pickupTime = Math.max(arrivalAtRestaurant, order.getReadyTime());
-
-            // ── Guard: skip if wait at restaurant is too long ─────
-            double waitAtRestaurant = pickupTime - arrivalAtRestaurant;
-            if (waitAtRestaurant > MAX_WAIT_MINUTES) continue;
-
-            // ── Factor 4: restaurant → customer (delivery distance) ─
-            double restaurantToCustomer = (graph != null)
-                    ? graph.shortestTime(pickup.getId(), dropoff.getId())
-                    : 0;
-
-            // Estimated delivery time
-            double estimatedDelivery = pickupTime + restaurantToCustomer;
-
-            // ── Guard: skip if delivery will miss the deadline ────
-            if (estimatedDelivery > order.getDeadline()) continue;
-
-            // ── Factor 1: time remaining until deadline ───────────
-            // Less time remaining → more urgent → lower score (we invert)
-            double timeUntilDeadline = order.getDeadline() - currentTime;
-
-            // ── Factor 3: ready time ──────────────────────────────
-            double readyTime = order.getReadyTime();
-
-            // ── Weighted score (lower = better assignment) ────────
-            //   Priority: deadline urgency > courier distance > readyTime > delivery dist
-            double score = (4.0 / Math.max(timeUntilDeadline, 1))
-                    + (3.0 * courierToRestaurant)
-                    + (2.0 * readyTime)
-                    + (1.0 * restaurantToCustomer);
-
-            // Save score for debug display in the orders table
-            lastScores.put(order.getId(), score);
-
-            if (score < bestScore) {
-                bestScore = score;
-                best      = order;
+        while (!plan.isEmpty()
+                && plan.peek().type == GeneticAlgorithm.ActionType.PICKUP) {
+            GeneticAlgorithm.RouteAction a = plan.peek();
+            if (currentTime >= a.order.getReadyTime()) {
+                plan.poll();
+                if (a.order.isAssigned()) {
+                    a.order.markPickedUp();
+                    courier.setCurrentCapacity(courier.getCurrentCapacity() + 1);
+                    courierCarried.computeIfAbsent(courier.getId(), k -> new ArrayList<>())
+                            .add(a.order);
+                }
+            } else {
+                courier.setActiveOrder(a.order);
+                courier.setStatus(Courier.Status.WAITING_AT_RESTAURANT);
+                return;
             }
         }
-        return best;
+        startNextPlanAction(courier);
+    }
+
+    private void processCustomerArrival(Courier courier, int currentTime) {
+        Order order = courier.getActiveOrder();
+        if (order != null && !order.isDelivered()) order.markDelivered();
+
+        List<Order> carried = courierCarried.get(courier.getId());
+        if (carried != null && order != null) carried.remove(order);
+        if (courier.getCurrentCapacity() > 0)
+            courier.setCurrentCapacity(courier.getCurrentCapacity() - 1);
+
+        startNextPlanAction(courier);
+    }
+
+    private void startNextPlanAction(Courier courier) {
+        Deque<GeneticAlgorithm.RouteAction> plan = courierPlans.get(courier.getId());
+        if (plan == null || plan.isEmpty()) { finishCourierPlan(courier); return; }
+
+        GeneticAlgorithm.RouteAction next = plan.peek();
+        Graph graph = model.getGraph();
+
+        if (next.type == GeneticAlgorithm.ActionType.PICKUP) {
+            Order order = next.order;
+            courier.setActiveOrder(order);
+            if (courier.getCurrentNode() == null) courier.setCurrentNode(order.getPickup());
+
+            List<Node>    path  = graph.getShortestPath(courier.getCurrentNode().getId(),
+                    order.getPickup().getId());
+            List<Integer> ticks = computeEdgeTicks(path, courier.getCurrentNode(), graph);
+            courier.setCurrentPath(path, ticks);
+            courier.setStatus(Courier.Status.HEADING_TO_RESTAURANT);
+
+        } else {
+            plan.poll();
+            Order order = next.order;
+            courier.setActiveOrder(order);
+
+            List<Node>    path  = graph.getShortestPath(courier.getCurrentNode().getId(),
+                    order.getDropoff().getId());
+            List<Integer> ticks = computeEdgeTicks(path, courier.getCurrentNode(), graph);
+            courier.setCurrentPath(path, ticks);
+            courier.setStatus(Courier.Status.DELIVERING);
+        }
+    }
+
+    private void finishCourierPlan(Courier courier) {
+        courier.setActiveOrder(null);
+        courier.setCurrentCapacity(0);
+        courier.setCurrentPath(new ArrayList<>(), new ArrayList<>());
+        courierPlans.remove(courier.getId());
+        courierCarried.remove(courier.getId());
+        courier.setStatus(Courier.Status.AVAILABLE);
+    }
+
+    // ── Edge tick computation ─────────────────────────────────────
+
+    private List<Integer> computeEdgeTicks(List<Node> path, Node start, Graph graph) {
+        List<Integer> ticks = new ArrayList<>();
+        if (path == null || path.isEmpty()) return ticks;
+        Node prev = start;
+        for (Node next : path) {
+            double w = 1.0;
+            for (Graph.Edge e : graph.getEdges(prev.getId()))
+                if (e.getTo() == next.getId()) { w = e.getWeight(); break; }
+            ticks.add(Math.max(1, (int) Math.round(w)));
+            prev = next;
+        }
+        return ticks;
+    }
+
+    // ── Console log helpers ───────────────────────────────────────
+
+    private void printGaHeader(int time, int nc, int no) {
+        System.out.println();
+        System.out.println("╔══════════════════════════════════════════════════════════════════╗");
+        System.out.printf ("║  🧬 GA RUN  t=%-4d  |  %d courier(s)  |  %d waiting order(s)%n", time, nc, no);
+        System.out.println("╠══════════════════════════════════════════════════════════════════╣");
+        System.out.flush();
+    }
+
+    private void printGaSummary(GeneticAlgorithm.Chromosome best, List<Courier> available) {
+        System.out.println("╠══════════════════════════════════════════════════════════════════╣");
+        System.out.printf ("║  ✅ BEST  fitness=%-8.1f%n", best.fitness);
+        System.out.println("║  Full route plans:");
+        for (int i = 0; i < best.routes.size(); i++) {
+            String label = (i < available.size()) ? "Courier "+available.get(i).getId() : "Courier "+(i+1);
+            List<GeneticAlgorithm.RouteAction> r = best.routes.get(i);
+            System.out.printf("║    %-12s → %s%n", label, r.isEmpty() ? "(idle)" : r.toString());
+        }
+        System.out.println("╚══════════════════════════════════════════════════════════════════╝");
+        System.out.println();
+        System.out.flush();
     }
 
     // ── City regeneration ─────────────────────────────────────────
 
-    /**
-     * Called when user clicks "New City".
-     * Controller rebuilds everything, then tells View to redraw.
-     * View does not touch the model — it just redraws what it receives.
-     */
     public void regenerateCity() {
         running = false;
-        model   = buildCity();
+        ticksSinceLastGA = GA_INTERVAL;
+        courierPlans.clear();
+        courierCarried.clear();
+        model = buildCity();
         refreshView();
     }
 
-    // ── View updates — Controller decides when View redraws ───────
+    // ── View updates ──────────────────────────────────────────────
 
-    /**
-     * Push all display data to the View.
-     * View receives exactly what it needs — nothing more.
-     */
     private void refreshView() {
         if (view == null) return;
-        view.drawMap(
-                model.getGraph(),
-                model.getRestaurant(),
-                model.getOrders(),
-                model.getCouriers()
-        );
-        view.updateSidebar(
-                model.getCurrentTime(),
+        view.drawMap(model.getGraph(), model.getRestaurant(), model.getOrders(), model.getCouriers());
+        view.updateSidebar(model.getCurrentTime(),
                 model.getWaitingOrders().size(),
                 (int) model.getOrders().stream().filter(Order::isAssigned).count(),
                 (int) model.getOrders().stream().filter(Order::isPickedUp).count(),
                 (int) model.getOrders().stream().filter(Order::isDelivered).count(),
-                model.getCouriers().size()
-        );
+                model.getCouriers().size());
         view.drawTable(buildTableRows());
     }
 
-    /**
-     * Build one display row per order.
-     * All decisions about what to show live here — not in the View.
-     */
     private List<view.OrderTableRow> buildTableRows() {
         List<view.OrderTableRow> rows = new ArrayList<>();
-        int currentTime = model.getCurrentTime();
+        int time = model.getCurrentTime();
 
         for (Order order : model.getOrders()) {
-
-            // Decision: which courier is handling this order?
-            Courier assignedCourier = null;
-            String  courierLabel   = "—";
+            Courier assigned = null;
+            String  label    = "—";
             for (Courier c : model.getCouriers()) {
-                if (c.getActiveOrder() != null &&
-                        c.getActiveOrder().getId() == order.getId()) {
-                    assignedCourier = c;
-                    courierLabel    = "Courier " + c.getId();
-                    break;
+                if (c.getActiveOrder() != null && c.getActiveOrder().getId() == order.getId()) {
+                    assigned = c; label = "Courier " + c.getId(); break;
+                }
+                List<Order> carried = courierCarried.get(c.getId());
+                if (carried != null && carried.stream().anyMatch(o -> o.getId() == order.getId())) {
+                    assigned = c; label = "Courier " + c.getId(); break;
                 }
             }
 
-            // Decision: human-readable status
             String status = switch (order.getStatus()) {
                 case WAITING   -> "WAITING";
                 case ASSIGNED  -> "ASSIGNED";
@@ -454,104 +470,44 @@ public class Controller {
                 case DELIVERED -> "DELIVERED";
             };
 
-            // Decision: ETA using real Dijkstra distances
             String eta;
             if (order.isDelivered()) {
                 eta = "✓";
-            } else if (assignedCourier != null) {
-                Graph graph = model.getGraph();
-                // Steps remaining in path = minutes left to walk
-                int stepsLeft = assignedCourier.getCurrentPath() != null
-                        ? assignedCourier.getCurrentPath().size() : 0;
-
-                if (assignedCourier.getStatus() == Courier.Status.DELIVERING) {
-                    // Already picked up — just delivery steps remaining
-                    eta = "t=" + (currentTime + stepsLeft);
+            } else if (assigned != null) {
+                int steps = assigned.getCurrentPath() != null ? assigned.getCurrentPath().size() : 0;
+                Graph g   = model.getGraph();
+                if (assigned.getStatus() == Courier.Status.DELIVERING
+                        && assigned.getActiveOrder() != null
+                        && assigned.getActiveOrder().getId() == order.getId()) {
+                    eta = "t=" + (time + steps);
                 } else {
-                    // Still heading to restaurant or waiting
-                    int walkToRest = stepsLeft;
-                    int waitForFood = Math.max(0, order.getReadyTime() - (currentTime + walkToRest));
-                    int deliverySteps = (graph != null)
-                            ? (int) graph.shortestTime(
-                            order.getPickup().getId(),
-                            order.getDropoff().getId())
-                            : 10;
-                    eta = "t=" + (currentTime + walkToRest + waitForFood + deliverySteps);
+                    int del  = (g != null) ? (int) g.shortestTime(order.getPickup().getId(), order.getDropoff().getId()) : 10;
+                    int wait = Math.max(0, order.getReadyTime() - (time + steps));
+                    eta = "t=" + (time + steps + wait + del);
                 }
             } else {
-                // Unassigned — estimate from restaurant to customer
-                Graph graph = model.getGraph();
-                int deliverySteps = (graph != null)
-                        ? (int) graph.shortestTime(
-                        order.getPickup().getId(),
-                        order.getDropoff().getId())
-                        : 10;
-                int earliest = Math.max(order.getReadyTime(), currentTime) + deliverySteps;
-                eta = "t=" + earliest;
+                Graph g = model.getGraph();
+                int del = (g != null) ? (int) g.shortestTime(order.getPickup().getId(), order.getDropoff().getId()) : 10;
+                eta = "t=" + (Math.max(order.getReadyTime(), time) + del);
             }
 
-            // Decision: is this order running late?
-            boolean isLate = currentTime > order.getDeadline()
-                    && !order.isDelivered();
+            boolean isLate = time > order.getDeadline() && !order.isDelivered();
+            Double  raw    = lastScores.get(order.getId());
+            String  score  = (raw != null && order.isWaiting()) ? String.format("%.1f", raw) : "—";
 
-            // Score from last pickBestOrder evaluation (null if not yet scored)
-            Double  rawScore   = lastScores.get(order.getId());
-            String  scoreLabel = (rawScore != null && order.isWaiting())
-                    ? String.format("%.1f", rawScore)
-                    : "—";
-
-            rows.add(new view.OrderTableRow(
-                    order.getId(),
-                    courierLabel,
-                    status,
-                    eta,
-                    order.getDeadline(),
-                    isLate,
-                    scoreLabel
-            ));
+            rows.add(new view.OrderTableRow(order.getId(), label, status, eta, order.getDeadline(), isLate, score));
         }
         return rows;
     }
 
-    // ── Node selection decisions ──────────────────────────────────
+    // ── Node selection ────────────────────────────────────────────
 
-    /** Pick the node closest to the centre of the map. */
-    private Node pickCentralNode(List<Node> nodes) {
-        double cx = MAP_WIDTH / 2, cy = MAP_HEIGHT / 2;
-        return nodes.stream()
-                .min(Comparator.comparingDouble(
-                        n -> Math.hypot(n.getX() - cx, n.getY() - cy)))
-                .orElse(nodes.get(0));
-    }
-
-    /** Pick the n nodes closest to the anchor. */
     private List<Node> nodesNear(Node anchor, List<Node> all, int n) {
-        List<Node> sorted = new ArrayList<>(all);
-        sorted.remove(anchor);
-        sorted.sort(Comparator.comparingDouble(
-                node -> Math.hypot(node.getX() - anchor.getX(),
-                        node.getY() - anchor.getY())));
-        return sorted.subList(0, Math.min(n, sorted.size()));
+        List<Node> s = new ArrayList<>(all); s.remove(anchor);
+        s.sort(Comparator.comparingDouble(nd -> Math.hypot(nd.getX()-anchor.getX(), nd.getY()-anchor.getY())));
+        return s.subList(0, Math.min(n, s.size()));
     }
 
-    /** Pick the n nodes farthest from the anchor. */
-    private List<Node> nodesFar(Node anchor, List<Node> all, int n) {
-        List<Node> sorted = new ArrayList<>(all);
-        sorted.remove(anchor);
-        sorted.sort(Comparator.comparingDouble(
-                node -> -Math.hypot(node.getX() - anchor.getX(),
-                        node.getY() - anchor.getY())));
-        return sorted.subList(0, Math.min(n, sorted.size()));
-    }
-
-    // ── Getters ───────────────────────────────────────────────────
-    public Model getModel() { return model; }
-    /**
-     * Test-only — inject a pre-built model directly.
-     * Allows tests to use a deterministic graph instead of the random one.
-     */
-    public void setModelForTest(Model m) {
-        this.model = m;
-    }
-
+    public Model getModel()            { return model; }
+    public void setModelForTest(Model m) { this.model = m; }
 }
